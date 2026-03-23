@@ -38,5 +38,25 @@ fi
 # environment variable was not set at image build time.
 export CODEX_CONFIG_DIR=/paperclip/.codex
 
+# Ensure the logs directory exists and is writable by the paperclip user
+mkdir -p /paperclip/logs
+chown paperclip:paperclip /paperclip/logs
+
+# Start Codex as a background HTTP service on localhost:8000 if auth is present.
+# Codex serve exposes an OpenAI-compatible API that Paperclip can connect to
+# without requiring any external API keys.
+CODEX_SERVE_PORT=8000
+CODEX_LOG=/paperclip/logs/codex-serve.log
+
+if [ -f "$CODEX_AUTH_FILE" ]; then
+  echo "🚀 Starting Codex serve on localhost:${CODEX_SERVE_PORT}..."
+  # Run as the paperclip user so it inherits the correct CODEX_CONFIG_DIR
+  gosu paperclip bash -c \
+    "CODEX_CONFIG_DIR=${CODEX_CONFIG_DIR} codex serve --port ${CODEX_SERVE_PORT} >> ${CODEX_LOG} 2>&1 &"
+  echo "   Codex serve started (logs: ${CODEX_LOG})"
+else
+  echo "⚠️  Codex serve not started — no auth token found. Authenticate first, then redeploy."
+fi
+
 # Drop privileges and run the actual command as the paperclip user
 exec gosu paperclip "$@"
