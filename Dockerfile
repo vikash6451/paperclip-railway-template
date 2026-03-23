@@ -1,17 +1,20 @@
 FROM node:20-slim
 
-# Install gosu for privilege dropping in entrypoint
+# Install system dependencies:
+#   ca-certificates — TLS trust for Codex/OpenAI API calls
+#   gosu            — privilege dropping in entrypoint
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gosu && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user (required: Claude CLI refuses --dangerously-skip-permissions as root)
 RUN groupadd -r paperclip && useradd -r -g paperclip -m -d /home/paperclip -s /bin/bash paperclip
 
 # Create the paperclip home directory (Railway volume mount point)
-RUN mkdir -p /paperclip && chown -R paperclip:paperclip /paperclip
+# and the .codex subdirectory for Codex CLI auth token storage
+RUN mkdir -p /paperclip/.codex && chown -R paperclip:paperclip /paperclip
 
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy package files and install dependencies (includes @openai/codex)
 COPY package.json ./
 RUN npm install --omit=dev
 
@@ -28,6 +31,10 @@ RUN chmod +x /entrypoint.sh
 # Railway injects PORT at runtime (default 3100)
 ENV PORT=3100
 EXPOSE 3100
+
+# Point Codex CLI at the persistent volume so auth tokens survive container restarts.
+# The actual token is written by running: codex login --device-auth
+ENV CODEX_CONFIG_DIR=/paperclip/.codex
 
 # Entrypoint runs as root to fix volume permissions, then drops to paperclip user
 ENTRYPOINT ["/entrypoint.sh"]
