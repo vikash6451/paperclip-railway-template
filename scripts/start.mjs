@@ -123,13 +123,22 @@ function startPaperclip() {
 
   writeConfig();
 
+  // Build the subprocess environment — explicitly exclude API keys so Paperclip
+  // does not attempt to call OpenAI/Anthropic directly. Users configure their
+  // LLM agent (e.g. Codex CLI with device auth) through Paperclip's own UI.
+  const {
+    OPENAI_API_KEY: _openai,       // eslint-disable-line no-unused-vars
+    ANTHROPIC_API_KEY: _anthropic, // eslint-disable-line no-unused-vars
+    ...inheritedEnv
+  } = process.env;
+
   paperclipProc = spawn(
     "node",
     ["node_modules/.bin/paperclipai", "run"],
     {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...process.env,
+        ...inheritedEnv,
         PAPERCLIP_CONFIG: CONFIG_PATH,
         PAPERCLIP_HOME: HOME,
         PORT: String(PAPERCLIP_PORT),
