@@ -18,7 +18,7 @@
  */
 
 import { createServer, request as httpRequest } from "http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, readdirSync, rmSync } from "fs";
 import { spawn } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -29,6 +29,7 @@ const PUBLIC_PORT = parseInt(process.env.PORT || "3100", 10);
 const PAPERCLIP_PORT = 3099;
 const HOME = process.env.PAPERCLIP_HOME || "/paperclip";
 const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
+const CODEX_CONFIG_DIR = process.env.CODEX_CONFIG_DIR || CODEX_HOME;
 const CODEX_AUTH_PATH = join(CODEX_HOME, "auth.json");
 const CONFIG_PATH = join(HOME, "config.json");
 const INVITE_FILE = join(HOME, "bootstrap-invite.txt");
@@ -64,23 +65,72 @@ function allEnvVarsSet() {
 }
 
 function seedCodexAuthFromEnv() {
-  const rawB64 = process.env.CODEX_AUTH_JSON_B64;
-  const rawJson = process.env.CODEX_AUTH_JSON;
+  const rawB64 = typeof process.env.CODEX_AUTH_JSON_B64 === "string"
+    ? process.env.CODEX_AUTH_JSON_B64.trim()
+    : "";
+  const rawJson = typeof process.env.CODEX_AUTH_JSON === "string"
+    ? process.env.CODEX_AUTH_JSON.trim()
+    : "";
   if (!rawB64 && !rawJson) return;
 
+  const normalizedB64 = rawB64.replace(/\s+/g, "");
   const authJson = rawB64
-    ? Buffer.from(rawB64, "base64").toString("utf8")
+    ? Buffer.from(normalizedB64, "base64").toString("utf8")
     : rawJson;
 
+  let parsedAuth;
   try {
-    JSON.parse(authJson);
+    parsedAuth = JSON.parse(authJson);
   } catch (_) {
     console.error("\n⚠️ Invalid CODEX_AUTH_JSON(_B64): expected valid JSON. Skipping Codex auth bootstrap.\n");
     return;
   }
 
-  writeFileSync(CODEX_AUTH_PATH, authJson);
+  const stripAccountId = process.env.CODEX_AUTH_STRIP_ACCOUNT_ID !== "false";
+  if (
+    stripAccountId &&
+    parsedAuth &&
+    typeof parsedAuth === "object" &&
+    !Array.isArray(parsedAuth) &&
+    parsedAuth.tokens &&
+    typeof parsedAuth.tokens === "object" &&
+    !Array.isArray(parsedAuth.tokens) &&
+    typeof parsedAuth.tokens.account_id === "string" &&
+    parsedAuth.tokens.account_id.trim().length > 0
+  ) {
+    delete parsedAuth.tokens.account_id;
+    console.log("   Removed Codex tokens.account_id from env-seeded auth (prevents stale workspace selection errors)");
+  }
+
+  writeFileSync(CODEX_AUTH_PATH, JSON.stringify(parsedAuth, null, 2), { mode: 0o600 });
   console.log(`   Codex auth written to ${CODEX_AUTH_PATH}`);
+}
+
+function sanitizeExistingCodexAuth() {
+  const stripAccountId = process.env.CODEX_AUTH_STRIP_ACCOUNT_ID !== "false";
+  if (!stripAccountId || !existsSync(CODEX_AUTH_PATH)) return;
+
+  try {
+    const raw = readFileSync(CODEX_AUTH_PATH, "utf8");
+    const parsedAuth = JSON.parse(raw);
+    if (
+      parsedAuth &&
+      typeof parsedAuth === "object" &&
+      !Array.isArray(parsedAuth) &&
+      parsedAuth.tokens &&
+      typeof parsedAuth.tokens === "object" &&
+      !Array.isArray(parsedAuth.tokens) &&
+      typeof parsedAuth.tokens.account_id === "string" &&
+      parsedAuth.tokens.account_id.trim().length > 0
+    ) {
+      delete parsedAuth.tokens.account_id;
+      writeFileSync(CODEX_AUTH_PATH, JSON.stringify(parsedAuth, null, 2), { mode: 0o600 });
+      console.log("   Removed stale Codex tokens.account_id from existing auth cache");
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`\n⚠️ Could not sanitize existing Codex auth cache at ${CODEX_AUTH_PATH}: ${reason}\n`);
+  }
 }
 
 function warnIfNoCodexAuth() {
@@ -95,12 +145,44 @@ function warnIfNoCodexAuth() {
   }
 }
 
+function resetCodexRuntimeState() {
+  const shouldReset = process.env.CODEX_RESET_STATE_ON_BOOT !== "false";
+  if (!shouldReset || !existsSync(CODEX_HOME)) return;
+
+  const runtimeDbPattern = /^(state|logs)_.*\.sqlite(?:-(wal|shm))?$/;
+  let removed = 0;
+
+  try {
+    for (const entry of readdirSync(CODEX_HOME, { withFileTypes: true })) {
+      if (entry.isFile() && runtimeDbPattern.test(entry.name)) {
+        unlinkSync(join(CODEX_HOME, entry.name));
+        removed += 1;
+      }
+    }
+
+    const sessionsPath = join(CODEX_HOME, "sessions");
+    if (existsSync(sessionsPath)) {
+      rmSync(sessionsPath, { recursive: true, force: true });
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      console.log(`   Reset Codex runtime state (${removed} stale entries removed)`);
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`\n⚠️ Could not reset stale Codex runtime state under ${CODEX_HOME}: ${reason}\n`);
+  }
+}
+
 // ── Config builder ────────────────────────────────────────────────────────────
 
 function writeConfig() {
   mkdirSync(HOME, { recursive: true });
   mkdirSync(CODEX_HOME, { recursive: true });
+  resetCodexRuntimeState();
   seedCodexAuthFromEnv();
+  sanitizeExistingCodexAuth();
   mkdirSync(join(HOME, "logs"), { recursive: true });
   mkdirSync(join(HOME, "storage"), { recursive: true });
 
@@ -159,6 +241,8 @@ function startPaperclip() {
 
   writeConfig();
   warnIfNoCodexAuth();
+  let codexAuth403HintShown = false;
+  let codexWorkspaceHintShown = false;
 
   paperclipProc = spawn(
     "node",
@@ -170,6 +254,7 @@ function startPaperclip() {
         PAPERCLIP_CONFIG: CONFIG_PATH,
         PAPERCLIP_HOME: HOME,
         CODEX_HOME,
+        CODEX_CONFIG_DIR,
         PORT: String(PAPERCLIP_PORT),
         HOST: "127.0.0.1",
         NODE_ENV: process.env.NODE_ENV || "production",
@@ -207,7 +292,38 @@ function startPaperclip() {
     }
   });
 
-  paperclipProc.stderr.on("data", chunk => process.stderr.write(chunk));
+  paperclipProc.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    process.stderr.write(chunk);
+
+    const clean = stripAnsi(text);
+    if (
+      !codexAuth403HintShown &&
+      clean.includes("responses_websocket") &&
+      clean.includes("403 Forbidden")
+    ) {
+      codexAuth403HintShown = true;
+      const hint = process.env.OPENAI_API_KEY
+        ? "OPENAI_API_KEY is set. Verify it is valid and not overridden by an empty agent adapter env value."
+        : "Set OPENAI_API_KEY (recommended for server deployments), or refresh CODEX_AUTH_JSON_B64 from a fresh `codex login` session.";
+      console.error(
+        "\n⚠️ Codex authentication failed (403 Forbidden at responses websocket).\n" +
+        `   ${hint}\n`
+      );
+    }
+
+    if (
+      !codexWorkspaceHintShown &&
+      clean.includes("invalid_workspace_selected")
+    ) {
+      codexWorkspaceHintShown = true;
+      console.error(
+        "\n⚠️ Codex workspace selection is invalid (`invalid_workspace_selected`).\n" +
+        "   Re-seed CODEX_AUTH_JSON_B64 from a fresh `codex login`, and keep CODEX_AUTH_STRIP_ACCOUNT_ID=true.\n" +
+        "   If this persists, use OPENAI_API_KEY auth for headless Railway deployments.\n"
+      );
+    }
+  });
 
   paperclipProc.on("error", err => {
     console.error("Paperclip process error:", err);
@@ -294,6 +410,9 @@ function envVarStatus() {
     { key: "PAPERCLIP_HOME", required: false, label: "Paperclip Home", example: "/paperclip" },
     { key: "CODEX_HOME", required: false, label: "Codex Home (auth cache)", example: "/paperclip/.codex" },
     { key: "CODEX_AUTH_JSON_B64", required: false, label: "Codex auth.json (base64)", example: "base64(auth.json) for headless login" },
+    { key: "CODEX_AUTH_STRIP_ACCOUNT_ID", required: false, label: "Strip account_id from auth cache", example: "true (default), set false to disable" },
+    { key: "CODEX_RESET_STATE_ON_BOOT", required: false, label: "Reset stale Codex runtime state", example: "true (default), set false to preserve local state DBs" },
+    { key: "OPENAI_API_KEY", required: false, label: "OpenAI API Key", example: "sk-..." },
     { key: "ANTHROPIC_API_KEY", required: false, label: "Anthropic API Key", example: "sk-ant-..." },
   ];
   return all.map(v => ({

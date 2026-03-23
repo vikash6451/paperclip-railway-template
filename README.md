@@ -37,8 +37,21 @@ HOST="0.0.0.0"
 PORT="3100"
 NODE_ENV="production"
 
+# Optional (recommended for headless/server deployments)
+OPENAI_API_KEY="sk-..."
+
 # Optional (Codex local auth cache path)
 CODEX_HOME="/paperclip/.codex"
+
+# Optional (seed auth.json directly for ChatGPT-session auth)
+CODEX_AUTH_JSON_B64="<base64_auth_json>"
+
+# Optional (default true): remove tokens.account_id from auth cache to avoid stale workspace selection errors
+CODEX_AUTH_STRIP_ACCOUNT_ID="true"
+
+# Optional (default true): reset Codex runtime sqlite/session state on each boot
+# Keeps auth.json/config.toml intact, but clears stale workspace/model selections
+CODEX_RESET_STATE_ON_BOOT="true"
 ```
 
 5. **Deploy** — Railway will run `npm start` which serves the setup page.
@@ -100,15 +113,26 @@ Once Paperclip is running, this wrapper is transparent — it just passes throug
 **Paperclip starts but agents can't connect**
 → Make sure `PAPERCLIP_DEPLOYMENT_EXPOSURE=public` is set so the server accepts external connections.
 
-**Codex shows `responses_websocket` auth errors (no API key flow)**
-→ This deployment is headless, so browser login is not available at runtime. Export your local Codex auth cache and store it as a Railway variable:
-1. On a machine where `codex login` already works, run:
+**Codex shows `responses_websocket` auth errors / `403 Forbidden`**
+→ Codex authentication is being rejected. Fix it in this order:
+1. Recommended for Railway/headless: set `OPENAI_API_KEY` and redeploy.
+2. If you use ChatGPT-session auth instead, refresh your local Codex login and re-export the auth cache:
 ```bash
+codex login
 base64 < ~/.codex/auth.json | tr -d '\n'
 ```
-2. In Railway Variables, set:
+3. In Railway Variables, set:
 ```env
 CODEX_AUTH_JSON_B64="<paste_base64_here>"
 CODEX_HOME="/paperclip/.codex"
 ```
-3. Redeploy. The wrapper writes `CODEX_HOME/auth.json` on boot.
+4. Redeploy. The wrapper writes `CODEX_HOME/auth.json` on boot.
+5. If `OPENAI_API_KEY` is already set and 403 still appears, check the agent's `adapterConfig.env` does not override `OPENAI_API_KEY` with an empty value.
+
+**Codex fails with `invalid_workspace_selected` (403 on `/backend-api/codex/models`)**
+→ Your ChatGPT session token is selecting an invalid/stale workspace/account.
+1. Keep `CODEX_AUTH_STRIP_ACCOUNT_ID=true` (default in this template) so stale `tokens.account_id` is removed at boot.
+2. Keep `CODEX_RESET_STATE_ON_BOOT=true` (default) so stale Codex runtime DB/session state is cleared on each deploy.
+3. Re-run `codex login` locally and refresh `CODEX_AUTH_JSON_B64`.
+4. Redeploy and retry the agent run.
+5. If it still fails, switch to `OPENAI_API_KEY` auth on Railway (headless environments are more stable with API-key auth).

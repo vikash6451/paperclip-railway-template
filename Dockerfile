@@ -37,7 +37,7 @@ ENV PORT=3100
 EXPOSE 3100
 
 # Point Codex CLI at the persistent volume so auth tokens survive container restarts.
-# The actual token is written by running: codex login --device-auth
+ENV CODEX_HOME=/paperclip/.codex
 ENV CODEX_CONFIG_DIR=/paperclip/.codex
 
 # Entrypoint runs as root to fix volume permissions, then drops to paperclip user
