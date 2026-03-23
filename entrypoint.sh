@@ -42,18 +42,18 @@ export CODEX_CONFIG_DIR=/paperclip/.codex
 mkdir -p /paperclip/logs
 chown paperclip:paperclip /paperclip/logs
 
-# Start Codex as a background HTTP service on localhost:8000 if auth is present.
-# Codex serve exposes an OpenAI-compatible API that Paperclip can connect to
+# Start Codex as a background WebSocket server on localhost:8000 if auth is present.
+# codex app-server exposes a WebSocket endpoint that Paperclip can connect to
 # without requiring any external API keys.
 CODEX_SERVE_PORT=8000
 CODEX_LOG=/paperclip/logs/codex-serve.log
 
 if [ -f "$CODEX_AUTH_FILE" ]; then
-  echo "🚀 Starting Codex serve on localhost:${CODEX_SERVE_PORT}..."
+  echo "🚀 Starting Codex app-server on ws://127.0.0.1:${CODEX_SERVE_PORT}..."
   # Run as the paperclip user so it inherits the correct CODEX_CONFIG_DIR
   gosu paperclip bash -c \
-    "CODEX_CONFIG_DIR=${CODEX_CONFIG_DIR} codex serve --port ${CODEX_SERVE_PORT} >> ${CODEX_LOG} 2>&1 &"
-  echo "   Codex serve started (logs: ${CODEX_LOG})"
+    "CODEX_CONFIG_DIR=${CODEX_CONFIG_DIR} codex app-server --listen ws://127.0.0.1:${CODEX_SERVE_PORT} >> ${CODEX_LOG} 2>&1 &"
+  echo "   Codex app-server started (logs: ${CODEX_LOG})"
 else
   echo "⚠️  Codex serve not started — no auth token found. Authenticate first, then redeploy."
 fi
