@@ -36,6 +36,9 @@ PAPERCLIP_HOME="/paperclip"
 HOST="0.0.0.0"
 PORT="3100"
 NODE_ENV="production"
+
+# Optional (Codex local auth cache path)
+CODEX_HOME="/paperclip/.codex"
 ```
 
 5. **Deploy** — Railway will run `npm start` which serves the setup page.
@@ -96,3 +99,16 @@ Once Paperclip is running, this wrapper is transparent — it just passes throug
 
 **Paperclip starts but agents can't connect**
 → Make sure `PAPERCLIP_DEPLOYMENT_EXPOSURE=public` is set so the server accepts external connections.
+
+**Codex shows `responses_websocket` auth errors (no API key flow)**
+→ This deployment is headless, so browser login is not available at runtime. Export your local Codex auth cache and store it as a Railway variable:
+1. On a machine where `codex login` already works, run:
+```bash
+base64 < ~/.codex/auth.json | tr -d '\n'
+```
+2. In Railway Variables, set:
+```env
+CODEX_AUTH_JSON_B64="<paste_base64_here>"
+CODEX_HOME="/paperclip/.codex"
+```
+3. Redeploy. The wrapper writes `CODEX_HOME/auth.json` on boot.

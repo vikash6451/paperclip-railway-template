@@ -27,8 +27,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PUBLIC_PORT = parseInt(process.env.PORT || "3100", 10);
 const PAPERCLIP_PORT = 3099;
-const CODEX_SERVE_PORT = 8000;
 const HOME = process.env.PAPERCLIP_HOME || "/paperclip";
+const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
+const CODEX_AUTH_PATH = join(CODEX_HOME, "auth.json");
 const CONFIG_PATH = join(HOME, "config.json");
 const INVITE_FILE = join(HOME, "bootstrap-invite.txt");
 const SKIP_REASON_FILE = join(HOME, "bootstrap-skip-reason.txt");
@@ -62,10 +63,44 @@ function allEnvVarsSet() {
   return REQUIRED_VARS.every(k => !!process.env[k]);
 }
 
+function seedCodexAuthFromEnv() {
+  const rawB64 = process.env.CODEX_AUTH_JSON_B64;
+  const rawJson = process.env.CODEX_AUTH_JSON;
+  if (!rawB64 && !rawJson) return;
+
+  const authJson = rawB64
+    ? Buffer.from(rawB64, "base64").toString("utf8")
+    : rawJson;
+
+  try {
+    JSON.parse(authJson);
+  } catch (_) {
+    console.error("\n⚠️ Invalid CODEX_AUTH_JSON(_B64): expected valid JSON. Skipping Codex auth bootstrap.\n");
+    return;
+  }
+
+  writeFileSync(CODEX_AUTH_PATH, authJson);
+  console.log(`   Codex auth written to ${CODEX_AUTH_PATH}`);
+}
+
+function warnIfNoCodexAuth() {
+  const hasOpenAiKey = !!process.env.OPENAI_API_KEY;
+  const hasAuthEnv = !!process.env.CODEX_AUTH_JSON_B64 || !!process.env.CODEX_AUTH_JSON;
+  const hasAuthFile = existsSync(CODEX_AUTH_PATH);
+  if (!hasOpenAiKey && !hasAuthEnv && !hasAuthFile) {
+    console.warn(
+      `\n⚠️ No OPENAI_API_KEY and no Codex auth cache found at ${CODEX_AUTH_PATH}.\n` +
+      "   Set OPENAI_API_KEY, or set CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON so Codex can authenticate.\n"
+    );
+  }
+}
+
 // ── Config builder ────────────────────────────────────────────────────────────
 
 function writeConfig() {
   mkdirSync(HOME, { recursive: true });
+  mkdirSync(CODEX_HOME, { recursive: true });
+  seedCodexAuthFromEnv();
   mkdirSync(join(HOME, "logs"), { recursive: true });
   mkdirSync(join(HOME, "storage"), { recursive: true });
 
@@ -107,14 +142,6 @@ function writeConfig() {
         keyFilePath: join(HOME, "secrets.key"),
       },
     },
-    // Route LLM requests to the local Codex serve instance running on
-    // localhost:8000. This avoids the need for external API keys — Codex
-    // authenticates via device auth stored in the persistent volume.
-    agent: {
-      provider: "openai_compatible",
-      baseUrl: `http://127.0.0.1:${CODEX_SERVE_PORT}/v1`,
-      model: process.env.CODEX_MODEL || "codex-mini-latest",
-    },
   };
 
   // Always overwrite — keeps config in sync with env vars on every boot
@@ -131,15 +158,7 @@ function startPaperclip() {
   console.log(`\n🚀 Starting Paperclip on internal port ${PAPERCLIP_PORT}...\n`);
 
   writeConfig();
-
-  // Build the subprocess environment — explicitly exclude external API keys so
-  // Paperclip does not attempt to call OpenAI/Anthropic directly. The local
-  // Codex serve instance (localhost:8000) is used instead via config.json.
-  const {
-    OPENAI_API_KEY: _openai,       // eslint-disable-line no-unused-vars
-    ANTHROPIC_API_KEY: _anthropic, // eslint-disable-line no-unused-vars
-    ...inheritedEnv
-  } = process.env;
+  warnIfNoCodexAuth();
 
   paperclipProc = spawn(
     "node",
@@ -147,9 +166,10 @@ function startPaperclip() {
     {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
-        ...inheritedEnv,
+        ...process.env,
         PAPERCLIP_CONFIG: CONFIG_PATH,
         PAPERCLIP_HOME: HOME,
+        CODEX_HOME,
         PORT: String(PAPERCLIP_PORT),
         HOST: "127.0.0.1",
         NODE_ENV: process.env.NODE_ENV || "production",
@@ -272,6 +292,8 @@ function envVarStatus() {
     { key: "PAPERCLIP_ALLOWED_HOSTNAMES", required: true, label: "Allowed Hostnames", example: "your-app.up.railway.app" },
     { key: "PAPERCLIP_DEPLOYMENT_MODE", required: false, label: "Deployment Mode", example: "authenticated" },
     { key: "PAPERCLIP_HOME", required: false, label: "Paperclip Home", example: "/paperclip" },
+    { key: "CODEX_HOME", required: false, label: "Codex Home (auth cache)", example: "/paperclip/.codex" },
+    { key: "CODEX_AUTH_JSON_B64", required: false, label: "Codex auth.json (base64)", example: "base64(auth.json) for headless login" },
     { key: "ANTHROPIC_API_KEY", required: false, label: "Anthropic API Key", example: "sk-ant-..." },
   ];
   return all.map(v => ({
