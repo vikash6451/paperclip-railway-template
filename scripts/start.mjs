@@ -27,6 +27,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PUBLIC_PORT = parseInt(process.env.PORT || "3100", 10);
 const PAPERCLIP_PORT = 3099;
+const CODEX_SERVE_PORT = 8000;
 const HOME = process.env.PAPERCLIP_HOME || "/paperclip";
 const CONFIG_PATH = join(HOME, "config.json");
 const INVITE_FILE = join(HOME, "bootstrap-invite.txt");
@@ -106,6 +107,14 @@ function writeConfig() {
         keyFilePath: join(HOME, "secrets.key"),
       },
     },
+    // Route LLM requests to the local Codex serve instance running on
+    // localhost:8000. This avoids the need for external API keys — Codex
+    // authenticates via device auth stored in the persistent volume.
+    agent: {
+      provider: "openai_compatible",
+      baseUrl: `http://127.0.0.1:${CODEX_SERVE_PORT}/v1`,
+      model: process.env.CODEX_MODEL || "codex-mini-latest",
+    },
   };
 
   // Always overwrite — keeps config in sync with env vars on every boot
@@ -123,9 +132,9 @@ function startPaperclip() {
 
   writeConfig();
 
-  // Build the subprocess environment — explicitly exclude API keys so Paperclip
-  // does not attempt to call OpenAI/Anthropic directly. Users configure their
-  // LLM agent (e.g. Codex CLI with device auth) through Paperclip's own UI.
+  // Build the subprocess environment — explicitly exclude external API keys so
+  // Paperclip does not attempt to call OpenAI/Anthropic directly. The local
+  // Codex serve instance (localhost:8000) is used instead via config.json.
   const {
     OPENAI_API_KEY: _openai,       // eslint-disable-line no-unused-vars
     ANTHROPIC_API_KEY: _anthropic, // eslint-disable-line no-unused-vars

@@ -8,15 +8,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Create a non-root user (required: Claude CLI refuses --dangerously-skip-permissions as root)
 RUN groupadd -r paperclip && useradd -r -g paperclip -m -d /home/paperclip -s /bin/bash paperclip
 
-# Create the paperclip home directory (Railway volume mount point)
-# and the .codex subdirectory for Codex CLI auth token storage
-RUN mkdir -p /paperclip/.codex && chown -R paperclip:paperclip /paperclip
+# Create the paperclip home directory (Railway volume mount point),
+# the .codex subdirectory for Codex CLI auth token storage,
+# and the logs directory for Codex serve output
+RUN mkdir -p /paperclip/.codex /paperclip/logs && chown -R paperclip:paperclip /paperclip
 
 WORKDIR /app
 
 # Copy package files and install dependencies (includes @openai/codex)
 COPY package.json ./
 RUN npm install --omit=dev
+
+# Make the codex binary available system-wide
+RUN ln -sf /app/node_modules/.bin/codex /usr/local/bin/codex
 
 # Copy application code
 COPY . .
