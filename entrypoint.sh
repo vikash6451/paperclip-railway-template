@@ -155,9 +155,15 @@ EOF
     export GITHUB_TOKEN
     export GH_TOKEN="$GITHUB_TOKEN"
     export GIT_TERMINAL_PROMPT=0
+    export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-paperclip-agent-app[bot]}"
+    export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-paperclip-agent-app[bot]@users.noreply.github.com}"
+    export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GIT_AUTHOR_NAME}"
+    export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$GIT_AUTHOR_EMAIL}"
     chown -R paperclip:paperclip /home/paperclip/.config 2>/dev/null || true
     gosu paperclip /usr/bin/git config --global --unset-all credential.helper || true
     gosu paperclip /usr/bin/git config --global credential.helper "/usr/local/bin/paperclip-git-credential-helper"
+    gosu paperclip /usr/bin/git config --global user.name "$GIT_AUTHOR_NAME"
+    gosu paperclip /usr/bin/git config --global user.email "$GIT_AUTHOR_EMAIL"
     gosu paperclip /usr/bin/git config --global --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
     gosu paperclip /usr/bin/git config --global --get-regexp '^url\..*github\.com/.*\.insteadOf$' | awk '{print $1}' | while read -r key; do
       gosu paperclip /usr/bin/git config --global --remove-section "${key#url.}" 2>/dev/null || true
