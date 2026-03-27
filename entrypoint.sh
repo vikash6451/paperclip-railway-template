@@ -13,6 +13,86 @@ CODEX_CONFIG_DIR="${CODEX_CONFIG_DIR:-$CODEX_HOME}"
 export CODEX_HOME
 export CODEX_CONFIG_DIR
 
+# Bootstrap GitHub CLI/git auth from GitHub App credentials when available.
+# This gives execution agents a short-lived installation token for clone/push/PR work.
+if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
+  echo "🔐 GitHub App credentials detected; minting installation token for agent repo access..."
+  if GITHUB_TOKEN="$(
+    node - <<'NODE'
+const crypto = require("crypto");
+
+const appId = process.env.GITHUB_APP_ID;
+const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
+const privateKey = (process.env.GITHUB_APP_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+
+function base64Url(value) {
+  return Buffer.from(typeof value === "string" ? value : JSON.stringify(value))
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+async function main() {
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${base64Url({ alg: "RS256", typ: "JWT" })}.${base64Url({
+    iat: now - 60,
+    exp: now + 540,
+    iss: appId,
+  })}`;
+
+  const signature = crypto
+    .createSign("RSA-SHA256")
+    .update(unsigned)
+    .sign(privateKey, "base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+
+  const jwt = `${unsigned}.${signature}`;
+  const response = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${jwt}`,
+      "User-Agent": "paperclip-github-bootstrap",
+    },
+  });
+
+  const body = await response.json();
+  if (!response.ok || !body.token) {
+    console.error(JSON.stringify(body));
+    process.exit(1);
+  }
+
+  process.stdout.write(body.token);
+}
+
+main().catch(err => {
+  console.error(String(err));
+  process.exit(1);
+});
+NODE
+  )"; then
+    export GITHUB_TOKEN
+    export GH_TOKEN="$GITHUB_TOKEN"
+    export GIT_TERMINAL_PROMPT=0
+    mkdir -p /home/paperclip/.config/gh
+    cat > /home/paperclip/.config/gh/hosts.yml <<EOF
+github.com:
+    oauth_token: ${GITHUB_TOKEN}
+    user: x-access-token
+    git_protocol: https
+EOF
+    chown -R paperclip:paperclip /home/paperclip/.config 2>/dev/null || true
+    gosu paperclip git config --global credential.helper ""
+    gosu paperclip git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+    echo "✅ GitHub App installation token configured for git and gh"
+  else
+    echo "⚠️  Failed to mint GitHub App installation token; git/gh repo auth may fail."
+  fi
+fi
+
 # Ensure the Codex auth directory exists and is writable by the paperclip user.
 mkdir -p "$CODEX_HOME"
 chown paperclip:paperclip "$CODEX_HOME" 2>/dev/null || true
