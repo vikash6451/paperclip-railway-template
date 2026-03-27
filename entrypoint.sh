@@ -14,16 +14,44 @@ export CODEX_HOME
 export CODEX_CONFIG_DIR
 
 # Bootstrap GitHub CLI/git auth from GitHub App credentials when available.
-# This gives execution agents a short-lived installation token for clone/push/PR work.
+# GitHub App installation tokens expire quickly, so install lightweight
+# helpers that refresh credentials on demand for both gh and git.
 if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] && [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then
-  echo "🔐 GitHub App credentials detected; minting installation token for agent repo access..."
-  if GITHUB_TOKEN="$(
-    node - <<'NODE'
+  echo "🔐 GitHub App credentials detected; installing refreshable git/gh auth helpers..."
+  install -d -m 0755 /usr/local/bin
+  cat > /usr/local/bin/paperclip-refresh-github-auth <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/paperclip/.config/gh}"
+TOKEN_CACHE="${GH_CONFIG_DIR}/token.json"
+mkdir -p "${GH_CONFIG_DIR}"
+
+node - <<'NODE'
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const appId = process.env.GITHUB_APP_ID;
 const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
 const privateKey = (process.env.GITHUB_APP_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const configDir = process.env.GH_CONFIG_DIR || "/home/paperclip/.config/gh";
+const tokenCache = process.env.TOKEN_CACHE || path.join(configDir, "token.json");
+const nowMs = Date.now();
+
+function readCachedToken() {
+  try {
+    const cached = JSON.parse(fs.readFileSync(tokenCache, "utf8"));
+    const expiresAtMs = Date.parse(cached.expires_at || "");
+    if (cached.token && Number.isFinite(expiresAtMs) && expiresAtMs - nowMs > 5 * 60 * 1000) {
+      return cached.token;
+    }
+  } catch (_) {
+    // Cache miss or malformed cache; fall through to minting a new token.
+  }
+
+  return null;
+}
 
 function base64Url(value) {
   return Buffer.from(typeof value === "string" ? value : JSON.stringify(value))
@@ -34,6 +62,12 @@ function base64Url(value) {
 }
 
 async function main() {
+  const cachedToken = readCachedToken();
+  if (cachedToken) {
+    process.stdout.write(cachedToken);
+    return;
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const unsigned = `${base64Url({ alg: "RS256", typ: "JWT" })}.${base64Url({
     iat: now - 60,
@@ -65,6 +99,17 @@ async function main() {
     process.exit(1);
   }
 
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(tokenCache, JSON.stringify({
+    token: body.token,
+    expires_at: body.expires_at,
+  }));
+  fs.writeFileSync(path.join(configDir, "hosts.yml"), `github.com:
+    oauth_token: ${body.token}
+    user: x-access-token
+    git_protocol: https
+`);
+
   process.stdout.write(body.token);
 }
 
@@ -73,23 +118,53 @@ main().catch(err => {
   process.exit(1);
 });
 NODE
-  )"; then
+EOF
+  chmod 0755 /usr/local/bin/paperclip-refresh-github-auth
+
+  cat > /usr/local/bin/paperclip-git-credential-helper <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+host=""
+protocol=""
+while IFS='=' read -r key value; do
+  case "$key" in
+    host) host="$value" ;;
+    protocol) protocol="$value" ;;
+  esac
+done
+
+if [ "$protocol" = "https" ] && [ "$host" = "github.com" ]; then
+  token="$(/usr/local/bin/paperclip-refresh-github-auth)"
+  printf 'username=x-access-token\npassword=%s\n' "$token"
+fi
+EOF
+  chmod 0755 /usr/local/bin/paperclip-git-credential-helper
+
+  cat > /usr/local/bin/gh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+export GH_TOKEN="$(
+  /usr/local/bin/paperclip-refresh-github-auth
+)"
+exec /usr/bin/gh "$@"
+EOF
+  chmod 0755 /usr/local/bin/gh
+
+  if GITHUB_TOKEN="$(/usr/local/bin/paperclip-refresh-github-auth)"; then
     export GITHUB_TOKEN
     export GH_TOKEN="$GITHUB_TOKEN"
     export GIT_TERMINAL_PROMPT=0
-    mkdir -p /home/paperclip/.config/gh
-    cat > /home/paperclip/.config/gh/hosts.yml <<EOF
-github.com:
-    oauth_token: ${GITHUB_TOKEN}
-    user: x-access-token
-    git_protocol: https
-EOF
     chown -R paperclip:paperclip /home/paperclip/.config 2>/dev/null || true
-    gosu paperclip git config --global credential.helper ""
-    gosu paperclip git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-    echo "✅ GitHub App installation token configured for git and gh"
+    gosu paperclip /usr/bin/git config --global --unset-all credential.helper || true
+    gosu paperclip /usr/bin/git config --global credential.helper "/usr/local/bin/paperclip-git-credential-helper"
+    gosu paperclip /usr/bin/git config --global --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
+    gosu paperclip /usr/bin/git config --global --get-regexp '^url\..*github\.com/.*\.insteadOf$' | awk '{print $1}' | while read -r key; do
+      gosu paperclip /usr/bin/git config --global --remove-section "${key#url.}" 2>/dev/null || true
+    done
+    echo "✅ Refreshable GitHub App credentials configured for git and gh"
   else
-    echo "⚠️  Failed to mint GitHub App installation token; git/gh repo auth may fail."
+    echo "⚠️  Failed to configure GitHub App credentials; git/gh repo auth may fail."
   fi
 fi
 
