@@ -40,6 +40,11 @@ NODE_ENV="production"
 # Optional (recommended for headless/server deployments)
 OPENAI_API_KEY="sk-..."
 
+# Optional override. This template defaults to:
+# image/png,image/jpeg,image/jpg,image/webp,image/gif,application/pdf,
+# text/markdown,text/plain,application/json,text/csv,text/html,video/mp4
+PAPERCLIP_ALLOWED_ATTACHMENT_TYPES="image/*,application/pdf,video/mp4"
+
 # Optional (Codex local auth cache path)
 CODEX_HOME="/paperclip/.codex"
 
@@ -79,6 +84,11 @@ npm start
 
 The setup page auto-polls Railway's env vars by hitting `/setup/status` — each var shows as ✓ Set or ✗ Missing in real time.
 
+For attachment delivery, this wrapper also exposes forced-download aliases that preserve Paperclip auth and switch the response to `Content-Disposition: attachment`:
+
+- `/api/attachments/:attachmentId/download`
+- `/api/assets/:assetId/download`
+
 ---
 
 ## Files
@@ -112,6 +122,14 @@ Once Paperclip is running, this wrapper is transparent — it just passes throug
 
 **Paperclip starts but agents can't connect**
 → Make sure `PAPERCLIP_DEPLOYMENT_EXPOSURE=public` is set so the server accepts external connections.
+
+**Attachments upload but browsers try to open them inline**
+→ Use the wrapper download aliases instead of the native `.../content` routes:
+- `/api/attachments/:attachmentId/download`
+- `/api/assets/:assetId/download`
+
+**`video/mp4` uploads are rejected**
+→ This template now includes `video/mp4` in the default attachment allowlist. If you override `PAPERCLIP_ALLOWED_ATTACHMENT_TYPES`, make sure `video/mp4` is still included.
 
 **Codex shows `responses_websocket` auth errors / `403 Forbidden`**
 → Codex authentication is being rejected. Fix it in this order:

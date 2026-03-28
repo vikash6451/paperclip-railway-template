@@ -34,6 +34,20 @@ const CODEX_AUTH_PATH = join(CODEX_HOME, "auth.json");
 const CONFIG_PATH = join(HOME, "config.json");
 const INVITE_FILE = join(HOME, "bootstrap-invite.txt");
 const SKIP_REASON_FILE = join(HOME, "bootstrap-skip-reason.txt");
+const DEFAULT_ALLOWED_ATTACHMENT_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "application/pdf",
+  "text/markdown",
+  "text/plain",
+  "application/json",
+  "text/csv",
+  "text/html",
+  "video/mp4",
+].join(",");
 
 // Strip ANSI escape sequences (colors, cursor, etc.) from strings
 function stripAnsi(str) {
@@ -143,6 +157,13 @@ function warnIfNoCodexAuth() {
       "   Set OPENAI_API_KEY, or set CODEX_AUTH_JSON_B64/CODEX_AUTH_JSON so Codex can authenticate.\n"
     );
   }
+}
+
+function resolveAllowedAttachmentTypes() {
+  const raw = typeof process.env.PAPERCLIP_ALLOWED_ATTACHMENT_TYPES === "string"
+    ? process.env.PAPERCLIP_ALLOWED_ATTACHMENT_TYPES.trim()
+    : "";
+  return raw || DEFAULT_ALLOWED_ATTACHMENT_TYPES;
 }
 
 function resetCodexRuntimeState() {
@@ -255,6 +276,7 @@ function startPaperclip() {
         PAPERCLIP_HOME: HOME,
         CODEX_HOME,
         CODEX_CONFIG_DIR,
+        PAPERCLIP_ALLOWED_ATTACHMENT_TYPES: resolveAllowedAttachmentTypes(),
         PORT: String(PAPERCLIP_PORT),
         HOST: "127.0.0.1",
         NODE_ENV: process.env.NODE_ENV || "production",
@@ -398,6 +420,78 @@ function proxy(req, res) {
   req.pipe(upstream, { end: true });
 }
 
+function getDownloadProxyTarget(reqUrl) {
+  const url = new URL(reqUrl, "http://localhost");
+  const attachmentMatch = url.pathname.match(/^\/api\/attachments\/([^/]+)\/download$/);
+  if (attachmentMatch) {
+    url.pathname = `/api/attachments/${attachmentMatch[1]}/content`;
+    url.searchParams.set("download", "1");
+    return url;
+  }
+
+  const assetMatch = url.pathname.match(/^\/api\/assets\/([^/]+)\/download$/);
+  if (assetMatch) {
+    url.pathname = `/api/assets/${assetMatch[1]}/content`;
+    url.searchParams.set("download", "1");
+    return url;
+  }
+
+  return null;
+}
+
+function proxyDownload(req, res) {
+  if (!paperclipReady) {
+    res.writeHead(503, { "Content-Type": "text/plain" });
+    res.end("Paperclip is starting up...");
+    return;
+  }
+
+  const targetUrl = getDownloadProxyTarget(req.url);
+  if (!targetUrl) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Download route not found" }));
+    return;
+  }
+
+  const opts = {
+    hostname: "127.0.0.1",
+    port: PAPERCLIP_PORT,
+    path: `${targetUrl.pathname}${targetUrl.search}`,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      "x-forwarded-host": req.headers.host,
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": req.socket.remoteAddress,
+    },
+  };
+
+  const upstream = httpRequest(opts, (upRes) => {
+    const headers = { ...upRes.headers };
+    const contentDisposition = upRes.headers["content-disposition"];
+
+    if (typeof contentDisposition === "string") {
+      headers["content-disposition"] = contentDisposition.replace(/^inline(?=;|$)/i, "attachment");
+    } else if (Array.isArray(contentDisposition)) {
+      headers["content-disposition"] = contentDisposition.map(value =>
+        value.replace(/^inline(?=;|$)/i, "attachment")
+      );
+    } else {
+      headers["content-disposition"] = "attachment";
+    }
+
+    res.writeHead(upRes.statusCode || 200, headers);
+    upRes.pipe(res, { end: true });
+  });
+
+  upstream.on("error", () => {
+    res.writeHead(502, { "Content-Type": "text/plain" });
+    res.end("Paperclip is restarting — please refresh in a moment.");
+  });
+
+  req.pipe(upstream, { end: true });
+}
+
 // ── Env var status (for setup page) ──────────────────────────────────────────
 
 function envVarStatus() {
@@ -407,6 +501,7 @@ function envVarStatus() {
     { key: "PAPERCLIP_PUBLIC_URL", required: true, label: "Public URL", example: "https://your-app.up.railway.app" },
     { key: "PAPERCLIP_ALLOWED_HOSTNAMES", required: true, label: "Allowed Hostnames", example: "your-app.up.railway.app" },
     { key: "PAPERCLIP_DEPLOYMENT_MODE", required: false, label: "Deployment Mode", example: "authenticated" },
+    { key: "PAPERCLIP_ALLOWED_ATTACHMENT_TYPES", required: false, label: "Allowed Attachment Types", example: "image/*,application/pdf,video/mp4" },
     { key: "PAPERCLIP_HOME", required: false, label: "Paperclip Home", example: "/paperclip" },
     { key: "CODEX_HOME", required: false, label: "Codex Home (auth cache)", example: "/paperclip/.codex" },
     { key: "CODEX_AUTH_JSON_B64", required: false, label: "Codex auth.json (base64)", example: "base64(auth.json) for headless login" },
@@ -512,6 +607,14 @@ function startServer() {
     if (path === "/setup") {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(readFileSync(join(__dirname, "setup.html"), "utf8"));
+      return;
+    }
+
+    if (
+      (path.startsWith("/api/attachments/") || path.startsWith("/api/assets/")) &&
+      path.endsWith("/download")
+    ) {
+      proxyDownload(req, res);
       return;
     }
 
